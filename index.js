@@ -13,18 +13,15 @@ app.use(cors({
     'http://localhost:5173',
     'http://localhost:5174',
     'https://ticketbari-client.vercel.app',
-    'https://ticketbari-project-client.vercel.app/',
+    'https://ticketbari-project-client.vercel.app',
     'https://ticketbari.web.app',
     'https://ticketbari.firebaseapp.com'
   ],
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
-
-// ============ ROOT ROUTE ============
-app.get('/', (req, res) => {
-  res.send('🎫 TicketBari Server is Running!');
-});
 
 // ============ MONGODB CONNECTION ============
 const uri = process.env.MONGODB_URI;
@@ -38,37 +35,55 @@ const client = new MongoClient(uri, {
     version: ServerApiVersion.v1,
     strict: true,
     deprecationErrors: true,
-  },
-  tls: true,
-  tlsAllowInvalidCertificates: true,
-  tlsAllowInvalidHostnames: true,
+  }
 });
 
 // ============ DATABASE & COLLECTIONS ============
+let db;
 let usersCollection;
 let ticketsCollection;
 let bookingsCollection;
 let paymentsCollection;
 
-async function run() {
+// ✅ Connect Function (Better Error Handling)
+async function connectDB() {
   try {
+    if (db) {
+      console.log("📌 Already connected to MongoDB");
+      return;
+    }
+    
     await client.connect();
-    console.log("✅ Connected to MongoDB!");
+    await client.db("admin").command({ ping: 1 });
+    
+    db = client.db("ticketBariDB");
+    
+    usersCollection = db.collection("users");
+    ticketsCollection = db.collection("tickets");
+    bookingsCollection = db.collection("bookings");
+    paymentsCollection = db.collection("payments");
 
-    const database = client.db("ticketBariDB");
-    usersCollection = database.collection("users");
-    ticketsCollection = database.collection("tickets");
-    bookingsCollection = database.collection("bookings");
-    paymentsCollection = database.collection("payments");
-
-    console.log("✅ Database collections ready!");
-
+    console.log("✅ Successfully connected to MongoDB!");
+    console.log("✅ Database collections initialized!");
   } catch (error) {
     console.error("❌ MongoDB Connection Error:", error.message);
+    process.exit(1); // Exit if DB connection fails
   }
 }
 
-run();
+// ✅ Middleware to ensure DB is connected before any request
+app.use(async (req, res, next) => {
+  if (!db) {
+    console.log("⚠️ DB not connected, attempting to connect...");
+    await connectDB();
+  }
+  next();
+});
+
+// ============ ROOT ROUTE ============
+app.get('/', (req, res) => {
+  res.send('🎫 TicketBari Server is Running!');
+});
 
 // ==================== JWT ROUTE ====================
 app.post('/jwt', async (req, res) => {
@@ -106,36 +121,53 @@ const verifyToken = (req, res, next) => {
 
 // Verify Admin
 const verifyAdmin = async (req, res, next) => {
-  const email = req.decoded.email;
-  const user = await usersCollection.findOne({ email: email });
-  if (user?.role !== 'admin') {
-    return res.status(403).send({ message: 'Forbidden access' });
+  try {
+    const email = req.decoded.email;
+    const user = await usersCollection.findOne({ email: email });
+    if (user?.role !== 'admin') {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+    next();
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
-  next();
 };
 
 // Verify Vendor
 const verifyVendor = async (req, res, next) => {
-  const email = req.decoded.email;
-  const user = await usersCollection.findOne({ email: email });
-  if (user?.role !== 'vendor') {
-    return res.status(403).send({ message: 'Forbidden access' });
+  try {
+    const email = req.decoded.email;
+    const user = await usersCollection.findOne({ email: email });
+    if (user?.role !== 'vendor') {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+    next();
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
-  next();
 };
 
 // ==================== PUBLIC STATS ROUTE ====================
 app.get('/public-stats', async (req, res) => {
   try {
+    // ✅ Ensure collections are initialized
+    if (!usersCollection || !bookingsCollection || !ticketsCollection) {
+      throw new Error("Database collections not initialized");
+    }
+
     const totalUsers = await usersCollection.countDocuments();
+    
     const bookings = await bookingsCollection.find().toArray();
     const totalTicketsSold = bookings.reduce((sum, booking) => sum + (booking.bookingQuantity || 0), 0);
+    
     const tickets = await ticketsCollection.find({}, { projection: { fromLocation: 1, toLocation: 1 } }).toArray();
     const routes = new Set(tickets.map(t => `${t.fromLocation}-${t.toLocation}`));
     const totalRoutes = routes.size;
+    
     const successfulBookings = await bookingsCollection.countDocuments({ status: 'paid' });
     const totalBookings = await bookingsCollection.countDocuments();
     const satisfactionRate = totalBookings > 0 ? Math.round((successfulBookings / totalBookings) * 100) : 98;
+    
     const totalVendors = await usersCollection.countDocuments({ role: 'vendor' });
     const totalTickets = await ticketsCollection.countDocuments({ verificationStatus: 'approved' });
 
@@ -403,12 +435,12 @@ app.get('/tickets', async (req, res) => {
     };
     
     // From Location Filter (case-insensitive)
-    if (from) {
+    if (from && from !== 'all') {
       query.fromLocation = { $regex: from, $options: 'i' };
     }
     
     // To Location Filter (case-insensitive)
-    if (to) {
+    if (to && to !== 'all') {
       query.toLocation = { $regex: to, $options: 'i' };
     }
     
@@ -600,7 +632,7 @@ app.patch('/admin/tickets/:id', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-// Delete ticket (Admin only) ✅ NEW
+// Delete ticket (Admin only)
 app.delete('/admin/tickets/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const id = req.params.id;
@@ -997,11 +1029,41 @@ app.get('/health', (req, res) => {
   res.send({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    database: usersCollection ? 'Connected' : 'Disconnected'
+    database: db ? 'Connected ✅' : 'Disconnected ❌',
+    collections: {
+      users: usersCollection ? 'Ready ✅' : 'Not Ready ❌',
+      tickets: ticketsCollection ? 'Ready ✅' : 'Not Ready ❌',
+      bookings: bookingsCollection ? 'Ready ✅' : 'Not Ready ❌',
+      payments: paymentsCollection ? 'Ready ✅' : 'Not Ready ❌'
+    }
   });
 });
 
+// ==================== 404 Handler ====================
+app.use((req, res) => {
+  res.status(404).send({ message: 'Route not found' });
+});
+
+// ==================== Error Handler ====================
+app.use((err, req, res, next) => {
+  console.error('❌ Server Error:', err);
+  res.status(500).send({ error: err.message });
+});
+
+// ==================== GRACEFUL SHUTDOWN ====================
+process.on('SIGINT', async () => {
+  console.log('\n⚠️ Shutting down gracefully...');
+  await client.close();
+  console.log('✅ MongoDB connection closed');
+  process.exit(0);
+});
+
 // ==================== START SERVER ====================
-app.listen(port, () => {
-  console.log(`🚀 TicketBari Server is running on port ${port}`);
+connectDB().then(() => {
+  app.listen(port, () => {
+    console.log(`🚀 TicketBari Server is running on port ${port}`);
+  });
+}).catch(err => {
+  console.error('❌ Failed to start server:', err);
+  process.exit(1);
 });
