@@ -14,7 +14,7 @@ app.use(cors({
     'http://localhost:5174',
     'https://ticketbari-client.vercel.app',
     'https://ticketbari-project-client.vercel.app',
-    'https://E-ticketbari.vercel.app',
+    'https://e-ticketbari.vercel.app',
     'https://ticketbari.web.app',
     'https://ticketbari.firebaseapp.com'
   ],
