@@ -7,8 +7,18 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors());
+// ============ MIDDLEWARE ============
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'https://ticketbari-client.vercel.app',
+    'https://ticketbari-project-client.vercel.app/',
+    'https://ticketbari.web.app',
+    'https://ticketbari.firebaseapp.com'
+  ],
+  credentials: true
+}));
 app.use(express.json());
 
 // ============ ROOT ROUTE ============
@@ -16,7 +26,7 @@ app.get('/', (req, res) => {
   res.send('🎫 TicketBari Server is Running!');
 });
 
-// MongoDB URI
+// ============ MONGODB CONNECTION ============
 const uri = process.env.MONGODB_URI;
 
 console.log("🔄 Connecting to MongoDB...");
@@ -314,6 +324,18 @@ app.patch('/users/role/:id', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
+// Delete user (Admin only)
+app.delete('/users/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const filter = { _id: new ObjectId(id) };
+    const result = await usersCollection.deleteOne(filter);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
 // Mark vendor as fraud (Admin only)
 app.patch('/users/fraud/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
@@ -327,6 +349,7 @@ app.patch('/users/fraud/:id', verifyToken, verifyAdmin, async (req, res) => {
     };
     const result = await usersCollection.updateOne(filter, updateDoc);
     
+    // Hide all tickets from fraud vendor
     const user = await usersCollection.findOne(filter);
     if (user) {
       await ticketsCollection.updateMany(
@@ -348,6 +371,7 @@ app.post('/tickets', verifyToken, verifyVendor, async (req, res) => {
   try {
     const ticket = req.body;
     
+    // Check if vendor is fraud
     const vendor = await usersCollection.findOne({ email: ticket.vendorEmail });
     if (vendor?.isFraud) {
       return res.status(403).send({ message: 'Fraud vendors cannot add tickets' });
@@ -368,7 +392,7 @@ app.post('/tickets', verifyToken, verifyVendor, async (req, res) => {
   }
 });
 
-// ✅ FIXED: Get all approved tickets (Public) - WITH FROM/TO FILTER
+// Get all approved tickets (Public) - WITH FROM/TO FILTER
 app.get('/tickets', async (req, res) => {
   try {
     const { search, from, to, transportType, sortPrice, page = 1, limit = 9 } = req.query;
@@ -378,12 +402,12 @@ app.get('/tickets', async (req, res) => {
       isHidden: { $ne: true }
     };
     
-    // ✅ From Location Filter (case-insensitive)
+    // From Location Filter (case-insensitive)
     if (from) {
       query.fromLocation = { $regex: from, $options: 'i' };
     }
     
-    // ✅ To Location Filter (case-insensitive)
+    // To Location Filter (case-insensitive)
     if (to) {
       query.toLocation = { $regex: to, $options: 'i' };
     }
@@ -469,7 +493,18 @@ app.get('/tickets/latest', async (req, res) => {
   }
 });
 
-// Get single ticket by ID
+// Get single ticket by ID (Public - for details page)
+app.get('/tickets/public/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const result = await ticketsCollection.findOne({ _id: new ObjectId(id) });
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
+// Get single ticket by ID (Protected)
 app.get('/tickets/:id', verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
@@ -534,10 +569,12 @@ app.delete('/tickets/:id', verifyToken, verifyVendor, async (req, res) => {
   }
 });
 
+// ==================== ADMIN TICKET ROUTES ====================
+
 // Get all tickets for admin
 app.get('/admin/tickets', verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const result = await ticketsCollection.find().toArray();
+    const result = await ticketsCollection.find().sort({ createdAt: -1 }).toArray();
     res.send(result);
   } catch (error) {
     res.status(500).send({ error: error.message });
@@ -557,6 +594,22 @@ app.patch('/admin/tickets/:id', verifyToken, verifyAdmin, async (req, res) => {
       }
     };
     const result = await ticketsCollection.updateOne(filter, updateDoc);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
+// Delete ticket (Admin only) ✅ NEW
+app.delete('/admin/tickets/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const filter = { _id: new ObjectId(id) };
+    
+    // Also delete related bookings
+    await bookingsCollection.deleteMany({ ticketId: id });
+    
+    const result = await ticketsCollection.deleteOne(filter);
     res.send(result);
   } catch (error) {
     res.status(500).send({ error: error.message });
@@ -594,6 +647,7 @@ app.post('/bookings', verifyToken, async (req, res) => {
   try {
     const booking = req.body;
     
+    // Check ticket availability
     const ticket = await ticketsCollection.findOne({ 
       _id: new ObjectId(booking.ticketId) 
     });
@@ -606,6 +660,7 @@ app.post('/bookings', verifyToken, async (req, res) => {
       return res.status(400).send({ message: 'Not enough tickets available' });
     }
     
+    // Check if departure time has passed
     const departureTime = new Date(ticket.departureDateTime);
     if (departureTime < new Date()) {
       return res.status(400).send({ message: 'Cannot book - departure time has passed' });
@@ -649,6 +704,19 @@ app.get('/bookings/vendor/:email', verifyToken, verifyVendor, async (req, res) =
     const email = req.params.email;
     const result = await bookingsCollection
       .find({ vendorEmail: email })
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
+// Get all bookings (Admin only)
+app.get('/admin/bookings', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const result = await bookingsCollection
+      .find()
       .sort({ createdAt: -1 })
       .toArray();
     res.send(result);
@@ -717,6 +785,17 @@ app.patch('/bookings/cancel/:id', verifyToken, async (req, res) => {
   }
 });
 
+// Delete booking (Admin only)
+app.delete('/admin/bookings/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const result = await bookingsCollection.deleteOne({ _id: new ObjectId(id) });
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
 // ==================== PAYMENT ROUTES ====================
 
 // Create payment intent (Stripe)
@@ -745,12 +824,14 @@ app.post('/payments', verifyToken, async (req, res) => {
   try {
     const payment = req.body;
     
+    // Save payment
     const paymentData = {
       ...payment,
       paymentDate: new Date().toISOString()
     };
     const paymentResult = await paymentsCollection.insertOne(paymentData);
     
+    // Update booking status
     const bookingFilter = { _id: new ObjectId(payment.bookingId) };
     const bookingUpdate = {
       $set: { 
@@ -761,6 +842,7 @@ app.post('/payments', verifyToken, async (req, res) => {
     };
     await bookingsCollection.updateOne(bookingFilter, bookingUpdate);
     
+    // Reduce ticket quantity
     const ticketFilter = { _id: new ObjectId(payment.ticketId) };
     const ticketUpdate = {
       $inc: { ticketQuantity: -payment.bookingQuantity }
@@ -792,6 +874,19 @@ app.get('/payments/:email', verifyToken, async (req, res) => {
   }
 });
 
+// Get all payments (Admin only)
+app.get('/admin/payments', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const result = await paymentsCollection
+      .find()
+      .sort({ paymentDate: -1 })
+      .toArray();
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
 // ==================== STATS ROUTES ====================
 
 // Get vendor stats
@@ -803,11 +898,16 @@ app.get('/vendor/stats/:email', verifyToken, verifyVendor, async (req, res) => {
     const totalRevenue = payments.reduce((sum, payment) => sum + payment.amount, 0);
     const totalTicketsSold = payments.reduce((sum, payment) => sum + payment.bookingQuantity, 0);
     const totalTicketsAdded = await ticketsCollection.countDocuments({ vendorEmail: email });
+    const pendingBookings = await bookingsCollection.countDocuments({ 
+      vendorEmail: email, 
+      status: 'pending' 
+    });
     
     res.send({
       totalRevenue,
       totalTicketsSold,
-      totalTicketsAdded
+      totalTicketsAdded,
+      pendingBookings
     });
   } catch (error) {
     res.status(500).send({ error: error.message });
@@ -821,6 +921,8 @@ app.get('/admin/stats', verifyToken, verifyAdmin, async (req, res) => {
     const totalVendors = await usersCollection.countDocuments({ role: 'vendor' });
     const totalTickets = await ticketsCollection.countDocuments();
     const totalBookings = await bookingsCollection.countDocuments();
+    const pendingTickets = await ticketsCollection.countDocuments({ verificationStatus: 'pending' });
+    const approvedTickets = await ticketsCollection.countDocuments({ verificationStatus: 'approved' });
     
     const revenueResult = await paymentsCollection.aggregate([
       { $group: { _id: null, total: { $sum: "$amount" } } }
@@ -831,6 +933,8 @@ app.get('/admin/stats', verifyToken, verifyAdmin, async (req, res) => {
       totalVendors,
       totalTickets,
       totalBookings,
+      pendingTickets,
+      approvedTickets,
       totalRevenue: revenueResult[0]?.total || 0
     });
   } catch (error) {
@@ -838,7 +942,66 @@ app.get('/admin/stats', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-// Start Server
+// ==================== USER STATS ====================
+app.get('/user/stats/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    
+    if (email !== req.decoded.email) {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+    
+    const totalBookings = await bookingsCollection.countDocuments({ userEmail: email });
+    const paidBookings = await bookingsCollection.countDocuments({ 
+      userEmail: email, 
+      status: 'paid' 
+    });
+    const pendingBookings = await bookingsCollection.countDocuments({ 
+      userEmail: email, 
+      status: 'pending' 
+    });
+    
+    const payments = await paymentsCollection.find({ userEmail: email }).toArray();
+    const totalSpent = payments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    res.send({
+      totalBookings,
+      paidBookings,
+      pendingBookings,
+      totalSpent
+    });
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
+// ==================== SEARCH LOCATIONS ====================
+app.get('/locations', async (req, res) => {
+  try {
+    const tickets = await ticketsCollection.find(
+      { verificationStatus: 'approved' },
+      { projection: { fromLocation: 1, toLocation: 1 } }
+    ).toArray();
+    
+    const fromLocations = [...new Set(tickets.map(t => t.fromLocation))].filter(Boolean);
+    const toLocations = [...new Set(tickets.map(t => t.toLocation))].filter(Boolean);
+    
+    res.send({ fromLocations, toLocations });
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
+// ==================== HEALTH CHECK ====================
+app.get('/health', (req, res) => {
+  res.send({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    database: usersCollection ? 'Connected' : 'Disconnected'
+  });
+});
+
+// ==================== START SERVER ====================
 app.listen(port, () => {
   console.log(`🚀 TicketBari Server is running on port ${port}`);
 });
